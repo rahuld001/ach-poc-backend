@@ -11,6 +11,9 @@ import transfers from './routes/transfers.js';
 import achFiles from './routes/achFiles.js';
 import sandbox from './routes/sandbox.js';
 
+// Falls back to the same public test key the UI uses, so a fresh deploy works before any env vars are set.
+const API_KEY = process.env.API_KEY || 'sk_test_ach_poc_123';
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -34,7 +37,7 @@ app.use('/api', async (_req, res, next) => {
 // Test-mode API key auth (mimics provider-style secret keys).
 app.use('/api', (req, res, next) => {
   const token = req.get('Authorization')?.replace(/^Bearer\s+/i, '');
-  if (!token || token !== process.env.API_KEY) return res.status(401).json({ error: 'Invalid API key' });
+  if (!token || token !== API_KEY) return res.status(401).json({ error: 'Invalid API key' });
   next();
 });
 
@@ -53,7 +56,7 @@ if (process.env.VERCEL) {
 
 app.get('/api/config', (_req, res) =>
   res.json({
-    mode: process.env.API_KEY?.startsWith('sk_test_') ? 'test' : 'live',
+    mode: API_KEY.startsWith('sk_test_') ? 'test' : 'live',
     plaid_enabled: plaidEnabled,
     return_codes: RETURN_CODES,
     test_account_outcomes: TEST_ACCOUNT_OUTCOMES,
