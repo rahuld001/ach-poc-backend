@@ -95,6 +95,16 @@ POST   /api/sandbox/process-bank
 
 Valid test routing numbers: `011401533`, `021000021`. Plaid sandbox login: `user_good` / `pass_good`.
 
+## Deploying on Vercel
+`src/index.js` exports the Express app, which Vercel runs as a serverless function.
+1. Add a Postgres database (Storage tab → Neon) so `DATABASE_URL` is set, plus `API_KEY` and `ENCRYPTION_KEY`.
+2. Turn off **Deployment Protection → Vercel Authentication** so the UI can call the API.
+3. Use the production URL (for example `https://ach-poc-backend.vercel.app`) as the UI's `VITE_API_URL`.
+
+Serverless functions have no background timers, so on Vercel the batcher and mock bank run during incoming API
+requests instead. The UI polls every few seconds, so payments still progress while it is open. Tables are created on
+the first request, and `/api/health` answers even when the database is unreachable (other routes return 503).
+
 ## Going to production
 Replace `src/services/mockBank.js` with delivery to a real bank (SFTP with PGP, or the bank's ACH API) and add
 processing of the bank's return and NOC files.
