@@ -1,9 +1,10 @@
 import { DISABLING_RETURN_CODES, RETURN_CODES } from '../ach.js';
 
 export class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, details) {
     super(message);
     this.status = status;
+    this.details = details; // optional structured data for the client, e.g. failed checks
   }
 }
 

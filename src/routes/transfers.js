@@ -3,13 +3,14 @@ import { query, withTx } from '../db.js';
 import { secCodeFor } from '../ach.js';
 import { HttpError, setTransferStatus } from '../services/transfers.js';
 import { increaseEnabled } from '../services/increase.js';
+import { checkPayment } from '../services/verification.js';
 
 const router = Router();
 
 const LIST_SQL = `
   SELECT t.id, t.direction, t.amount_cents, t.description, t.sec_code, t.status, t.trace_number,
          t.ach_file_id, t.effective_date, t.return_code, t.return_reason, t.created_at, t.updated_at,
-         t.rail, t.provider_transfer_id,
+         t.rail, t.provider_transfer_id, t.risk,
          a.id AS bank_account_id, a.holder_name, a.institution_name, a.last4, a.account_type
     FROM transfers t JOIN bank_accounts a ON a.id = t.bank_account_id`;
 
@@ -63,7 +64,13 @@ router.post('/', async (req, res) => {
           AND status NOT IN ('cancelled', 'failed', 'returned')`,
       [bank_account_id],
     );
-    if (total + amount_cents > daily) throw new HttpError(400, `Daily limit of $${(daily / 100).toFixed(2)} exceeded for this account`);
+    if (total + amount_cents > daily) throw new HttpError(400, `Daily limit of ${(daily / 100).toFixed(2)} exceeded for this account`);
+
+    // Pre-payment checks (simulated): sanctions, account validation, identity, balance, duplicates, velocity.
+    const risk = await checkPayment(client, { account, direction, amount_cents });
+    if (risk.decision === 'block') {
+      throw new HttpError(422, `Payment blocked: ${risk.checks.find((c) => c.level === 'fail').label}`, { risk });
+    }
 
     const { rows: [mandate] } = await client.query(
       `INSERT INTO mandates (bank_account_id, authorization_text, ip_address, user_agent)
@@ -71,9 +78,9 @@ router.post('/', async (req, res) => {
       [bank_account_id, authorization.text, req.ip, req.get('User-Agent') ?? null],
     );
     const { rows: [t] } = await client.query(
-      `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, idempotency_key, rail)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8) RETURNING id`,
-      [bank_account_id, mandate.id, direction, amount_cents, description ?? null, secCodeFor(direction), idempotencyKey, rail],
+      `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, idempotency_key, rail, risk)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9) RETURNING id`,
+      [bank_account_id, mandate.id, direction, amount_cents, description ?? null, secCodeFor(direction), idempotencyKey, rail, risk],
     );
     await client.query(`INSERT INTO transfer_events (transfer_id, status, note) VALUES ($1, 'pending', 'Transfer created')`, [t.id]);
     return t;

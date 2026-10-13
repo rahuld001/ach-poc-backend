@@ -5,11 +5,12 @@ import { encrypt } from '../crypto.js';
 import { isValidRoutingNumber } from '../ach.js';
 import { createLinkToken, exchangeAndGetAuth, plaidEnabled } from '../plaid.js';
 import { HttpError } from '../services/transfers.js';
+import { verifyCustomer, verifyPlaidCustomer } from '../services/verification.js';
 
 const router = Router();
 
 const PUBLIC_COLUMNS = `id, holder_name, institution_name, routing_number, last4, account_type,
-                        source, status, disabled_reason, created_at`;
+                        source, status, disabled_reason, kyc, created_at`;
 
 router.get('/', async (_req, res) => {
   const { rows } = await query(`SELECT ${PUBLIC_COLUMNS} FROM bank_accounts ORDER BY created_at DESC`);
@@ -18,19 +19,26 @@ router.get('/', async (_req, res) => {
 
 // Manual entry: validated, then verified with simulated micro-deposits.
 router.post('/', async (req, res) => {
-  const { holder_name, routing_number, account_number, account_type = 'checking' } = req.body ?? {};
+  const { holder_name, routing_number, account_number, account_type = 'checking', dob, ssn_last4, address } = req.body ?? {};
   if (!holder_name?.trim()) throw new HttpError(400, 'holder_name is required');
   if (!isValidRoutingNumber(String(routing_number ?? ''))) throw new HttpError(400, 'Invalid routing number');
   if (!/^\d{4,17}$/.test(String(account_number ?? ''))) throw new HttpError(400, 'Account number must be 4-17 digits');
   if (!['checking', 'savings'].includes(account_type)) throw new HttpError(400, 'account_type must be checking or savings');
+  if (ssn_last4 && !/^\d{4}$/.test(String(ssn_last4))) throw new HttpError(400, 'SSN last 4 must be 4 digits');
+
+  // Identity, sanctions and account-status checks (simulated). A failure stops the account from being linked.
+  const kyc = verifyCustomer({ holder_name, dob, ssn_last4, address, last4: String(account_number).slice(-4) });
+  if (kyc.result === 'fail') {
+    throw new HttpError(422, `Verification failed: ${kyc.checks.find((c) => c.level === 'fail').label}`, { kyc });
+  }
 
   const amounts = [crypto.randomInt(1, 100), crypto.randomInt(1, 100)];
   const account = await withTx(async (client) => {
     const { rows: [row] } = await client.query(
-      `INSERT INTO bank_accounts (holder_name, routing_number, account_number_enc, last4, account_type, source, status)
-       VALUES ($1, $2, $3, $4, $5, 'manual', 'pending_verification')
+      `INSERT INTO bank_accounts (holder_name, routing_number, account_number_enc, last4, account_type, source, status, kyc)
+       VALUES ($1, $2, $3, $4, $5, 'manual', 'pending_verification', $6)
        RETURNING ${PUBLIC_COLUMNS}`,
-      [holder_name.trim(), routing_number, encrypt(account_number), String(account_number).slice(-4), account_type],
+      [holder_name.trim(), routing_number, encrypt(account_number), String(account_number).slice(-4), account_type, kyc],
     );
     await client.query(
       `INSERT INTO micro_deposits (bank_account_id, amount1_cents, amount2_cents, expires_at)
@@ -107,12 +115,13 @@ router.post('/plaid/exchange', async (req, res) => {
     for (const a of accounts) {
       const { rows } = await client.query(
         `INSERT INTO bank_accounts (holder_name, institution_name, routing_number, account_number_enc, last4,
-                                    account_type, source, plaid_item_id, plaid_account_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'plaid', $7, $8, 'verified')
+                                    account_type, source, plaid_item_id, plaid_account_id, status, kyc)
+         VALUES ($1, $2, $3, $4, $5, $6, 'plaid', $7, $8, 'verified', $9)
          ON CONFLICT (plaid_account_id) DO NOTHING
          RETURNING ${PUBLIC_COLUMNS}`,
         [holder_name?.trim() || a.name || 'Plaid Account Holder', institution_name ?? null, a.routing,
-         encrypt(a.account), a.account.slice(-4), a.type, item.id, a.plaidAccountId],
+         encrypt(a.account), a.account.slice(-4), a.type, item.id, a.plaidAccountId,
+         verifyPlaidCustomer(holder_name?.trim() || a.name)],
       );
       out.push(...rows);
     }

@@ -96,6 +96,16 @@ POST   /api/sandbox/process-bank
 
 Valid test routing numbers: `011401533`, `021000021`. Plaid sandbox login: `user_good` / `pass_good`.
 
+## Simulated verification and go-live
+Real ACH systems buy these checks from vendors; here they are simulated (`src/services/verification.js`,
+`src/routes/onboarding.js`) so every outcome can be demoed. Nothing external is called.
+
+| Where | Checks | Test inputs |
+|---|---|---|
+| Adding a bank account (`POST /api/accounts` with `dob`, `ssn_last4`, `address`) | Identity (name/DOB/SSN), age, address, OFAC sanctions, account status | SSN last 4 `0000` or name `OFAC Test` or under 18 → 422, account not linked; account ending `0002`/`0003` → status warning |
+| Every payment (`risk` on the transfer) | OFAC re-screen, Nacha account validation, identity, balance (debits), duplicates, velocity | …0001 → low-balance warning; same amount twice in 10 min → duplicate warning; sanctions hit → 422 blocked |
+| Go Live (`/api/onboarding`) | KYB, owner KYC, bank/provider underwriting, compliance, funding, live keys | EIN ending `9999` → needs documents; `00-0000000` → rejected; volume > 5M → needs financials |
+
 ## Payment rails
 Each payment chooses a rail (`rail` in `POST /api/transfers`, picked on the New Payment screen):
 

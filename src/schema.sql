@@ -94,3 +94,14 @@ CREATE SEQUENCE IF NOT EXISTS trace_seq;
 -- Which rail sends the transfer: 'mock' (our NACHA file + mock bank) or 'increase' (Increase ACH API).
 ALTER TABLE transfers ADD COLUMN IF NOT EXISTS rail text NOT NULL DEFAULT 'mock' CHECK (rail IN ('mock', 'increase'));
 ALTER TABLE transfers ADD COLUMN IF NOT EXISTS provider_transfer_id text UNIQUE;
+
+-- Simulated go-live onboarding (KYB, KYC, provider underwriting, compliance, funding). One row, JSON state.
+CREATE TABLE IF NOT EXISTS onboarding (
+  id         int PRIMARY KEY CHECK (id = 1),
+  state      jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Simulated verification results: customer identity / sanctions / account status (per account) and pre-payment risk checks.
+ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS kyc jsonb;
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS risk jsonb;

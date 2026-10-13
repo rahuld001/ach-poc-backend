@@ -11,6 +11,7 @@ import accounts from './routes/accounts.js';
 import transfers from './routes/transfers.js';
 import achFiles from './routes/achFiles.js';
 import sandbox from './routes/sandbox.js';
+import onboarding from './routes/onboarding.js';
 
 // Falls back to the same public test key the UI uses, so a fresh deploy works before any env vars are set.
 const API_KEY = process.env.API_KEY || 'sk_test_ach_poc_123';
@@ -76,9 +77,10 @@ app.use('/api/accounts', accounts);
 app.use('/api/transfers', transfers);
 app.use('/api/ach-files', achFiles);
 app.use('/api/sandbox', sandbox);
+app.use('/api/onboarding', onboarding);
 
 app.use((err, _req, res, _next) => {
-  if (err.status) return res.status(err.status).json({ error: err.message });
+  if (err.status) return res.status(err.status).json({ error: err.message, ...(err.details && { details: err.details }) });
   if (err.code === '22P02') return res.status(400).json({ error: 'Invalid id' }); // bad uuid
   if (err.code === '23505') return res.status(409).json({ error: 'Duplicate request' });
   console.error(err);
