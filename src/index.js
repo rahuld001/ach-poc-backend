@@ -1,11 +1,12 @@
 import 'dotenv/config'; // must stay first: other modules read process.env on import
+import { API_KEY, ORIGINATOR, SIM, isTestMode } from './config.js'; // second: validates the environment before anything else loads
 import express from 'express';
 import cors from 'cors';
 import { initDb } from './db.js';
 import { plaidEnabled } from './plaid.js';
-import { RETURN_CODES, TEST_ACCOUNT_OUTCOMES } from './ach.js';
+import { AUTHORIZATION_TEMPLATES, NOC_CODES, RETURN_CODES, TEST_ACCOUNT_OUTCOMES, TEST_NOC_OUTCOMES } from './ach.js';
 import { runBatch } from './services/batcher.js';
-import { processDueFiles } from './services/mockBank.js';
+import { runOdfiJobs, transportName } from './services/odfi/index.js';
 import { increaseEnabled, increaseSandbox, sendPendingToIncrease, syncIncrease } from './services/increase.js';
 import accounts from './routes/accounts.js';
 import transfers from './routes/transfers.js';
@@ -13,12 +14,11 @@ import achFiles from './routes/achFiles.js';
 import sandbox from './routes/sandbox.js';
 import onboarding from './routes/onboarding.js';
 
-// Falls back to the same public test key the UI uses, so a fresh deploy works before any env vars are set.
-const API_KEY = process.env.API_KEY || 'sk_test_ach_poc_123';
-
 const app = express();
+// Behind Vercel's proxy, so req.ip (stored on each mandate as evidence of who authorized the payment) is the client.
+if (process.env.VERCEL) app.set('trust proxy', 1);
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' })); // inbound NACHA files are posted as text
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -36,7 +36,7 @@ app.use('/api', async (_req, res, next) => {
   }
 });
 
-// Test-mode API key auth (mimics provider-style secret keys).
+// API key auth (mimics provider-style secret keys).
 app.use('/api', (req, res, next) => {
   const token = req.get('Authorization')?.replace(/^Bearer\s+/i, '');
   if (!token || token !== API_KEY) return res.status(401).json({ error: 'Invalid API key' });
@@ -44,7 +44,7 @@ app.use('/api', (req, res, next) => {
 });
 
 // Serverless stand-in for the timers below: run any job that is due before handling the request. The UI polls
-// every few seconds, so payments still move pending → submitted → settled on their own while it is open.
+// every few seconds, so payments still move pending → submitted → accepted → settled on their own while it is open.
 if (process.env.VERCEL) {
   const lastRun = new Map();
   app.use('/api', async (_req, _res, next) => {
@@ -58,12 +58,25 @@ if (process.env.VERCEL) {
 
 app.get('/api/config', (_req, res) =>
   res.json({
-    mode: API_KEY.startsWith('sk_test_') ? 'test' : 'live',
+    mode: isTestMode ? 'test' : 'live',
+    authorization_templates: AUTHORIZATION_TEMPLATES,
+    direct_ach: {
+      transport: transportName,
+      odfi_name: ORIGINATOR.odfiName,
+      odfi_routing: ORIGINATOR.odfiRouting,
+      company_name: ORIGINATOR.companyName,
+      company_id: ORIGINATOR.companyId,
+      line_ending: ORIGINATOR.lineEnding,
+      balanced: ORIGINATOR.balanced,
+    },
+    simulation: { banking_day_seconds: SIM.bankingDaySeconds, ack_seconds: SIM.ackSeconds },
     plaid_enabled: plaidEnabled,
     rails: { mock: true, increase: increaseEnabled },
     increase_env: increaseEnabled ? (increaseSandbox ? 'sandbox' : 'production') : null,
     return_codes: RETURN_CODES,
+    noc_codes: NOC_CODES,
     test_account_outcomes: TEST_ACCOUNT_OUTCOMES,
+    test_noc_outcomes: TEST_NOC_OUTCOMES,
     limits: {
       max_transfer_cents: Number(process.env.MAX_TRANSFER_CENTS ?? 1_000_000),
       daily_limit_cents: Number(process.env.DAILY_LIMIT_CENTS ?? 2_500_000),
@@ -76,7 +89,7 @@ app.get('/api/config', (_req, res) =>
 app.use('/api/accounts', accounts);
 app.use('/api/transfers', transfers);
 app.use('/api/ach-files', achFiles);
-app.use('/api/sandbox', sandbox);
+if (isTestMode) app.use('/api/sandbox', sandbox); // simulation endpoints do not exist in live mode
 app.use('/api/onboarding', onboarding);
 
 app.use((err, _req, res, _next) => {
@@ -89,7 +102,7 @@ app.use((err, _req, res, _next) => {
 
 const JOBS = [
   { name: 'batcher', seconds: Number(process.env.BATCH_INTERVAL_SECONDS ?? 60), fn: runBatch },
-  { name: 'mock-bank', seconds: 5, fn: processDueFiles },
+  { name: 'odfi', seconds: 3, fn: runOdfiJobs }, // acknowledgments, settlement, returns and NOCs from the bank
   { name: 'increase-send', seconds: Number(process.env.BATCH_INTERVAL_SECONDS ?? 60), fn: sendPendingToIncrease },
   { name: 'increase-sync', seconds: 5, fn: syncIncrease },
 ];
@@ -104,5 +117,7 @@ if (!process.env.VERCEL) {
     setInterval(() => job.fn().catch((e) => console.error(`[${job.name}]`, e.message)), job.seconds * 1000);
   }
   const port = Number(process.env.PORT ?? 4000);
-  app.listen(port, () => console.log(`ACH POC API on http://localhost:${port} (plaid: ${plaidEnabled ? 'on' : 'off'})`));
+  app.listen(port, () =>
+    console.log(`ACH POC API on http://localhost:${port} (ODFI transport: ${transportName}, plaid: ${plaidEnabled ? 'on' : 'off'})`),
+  );
 }

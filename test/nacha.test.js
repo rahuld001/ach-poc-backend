@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAchFile, parseAchFile } from '../src/nacha.js';
-import { isValidRoutingNumber, nextBusinessDay, transactionCode } from '../src/ach.js';
+import { buildAchFile, maskAccountNumbers, parseAchFile } from '../src/nacha.js';
+import { isValidRoutingNumber, transactionCode } from '../src/ach.js';
 
 const base = {
   odfiRouting: '011000015',
@@ -37,11 +37,6 @@ test('transaction codes', () => {
   assert.equal(transactionCode('credit', 'savings'), '32');
 });
 
-test('next business day skips weekends', () => {
-  assert.equal(nextBusinessDay(new Date(2026, 9, 9)).getDay(), 1); // Fri -> Mon
-  assert.equal(nextBusinessDay(new Date(2026, 9, 12)).getDate(), 13); // Mon -> Tue
-});
-
 test('builds a valid, balanced NACHA file', () => {
   const file = buildAchFile({
     ...base,
@@ -49,6 +44,7 @@ test('builds a valid, balanced NACHA file', () => {
       {
         secCode: 'WEB',
         entryDescription: 'PAYMENT',
+        paymentTypeCode: 'S',
         effectiveDate: new Date(2026, 9, 13),
         entries: [entry(), entry({ amountCents: 1234, traceNumber: '011000010000002', routing: '021000021' })],
       },
@@ -70,7 +66,9 @@ test('builds a valid, balanced NACHA file', () => {
   assert.equal(lines[0].slice(23, 29), '261012'); // creation date
   assert.equal(lines[1].slice(1, 4), '225'); // debit-only batch
   assert.equal(lines[1].slice(50, 53), 'WEB');
+  assert.equal(lines[2].slice(76, 78), 'S '); // WEB payment type code: single entry
   assert.equal(lines[5].slice(1, 4), '220'); // credit-only batch
+  assert.equal(lines[6].slice(76, 78), '  '); // PPD: discretionary data blank
 
   assert.equal(file.entryCount, 3);
   assert.equal(file.totalDebitCents, 6234);
@@ -83,12 +81,41 @@ test('builds a valid, balanced NACHA file', () => {
   assert.equal(parsed.entries[0].account, '1111222233330000');
   assert.equal(parsed.entries[0].traceNumber, '011000010000001');
   assert.equal(parsed.entries[1].amountCents, 1234);
+  assert.equal(parsed.entries[0].paymentTypeCode, 'S');
+  assert.equal(parsed.entries[2].paymentTypeCode, '');
+});
+
+test('WEB entries must carry a payment type code', () => {
+  assert.throws(
+    () => buildAchFile({ ...base, batches: [{ secCode: 'WEB', entryDescription: 'PAYMENT', effectiveDate: new Date(), entries: [entry()] }] }),
+    /Payment Type Code/,
+  );
+  // Per-entry code also accepted, and 'R' for recurring.
+  const file = buildAchFile({
+    ...base,
+    batches: [{ secCode: 'WEB', entryDescription: 'PAYMENT', effectiveDate: new Date(), entries: [entry({ paymentTypeCode: 'R' })] }],
+  });
+  assert.equal(file.content.split('\n')[2].slice(76, 78), 'R ');
+});
+
+test('masking hides everything but the last 4 digits of each account number', () => {
+  const file = buildAchFile({
+    ...base,
+    batches: [{ secCode: 'PPD', entryDescription: 'PAYOUT', effectiveDate: new Date(), entries: [entry({ transactionCode: '22' })] }],
+  });
+  const masked = maskAccountNumbers(file.content);
+  const lines = masked.trimEnd().split('\n');
+  assert.equal(lines[2].slice(12, 29), '************0000 ');
+  assert.ok(!masked.includes('1111222233330000'));
+  assert.equal(lines[2].length, 94);
+  assert.equal(lines[2].slice(29), file.content.split('\n')[2].slice(29), 'rest of the record unchanged');
+  assert.equal(parseAchFile(masked).entries[0].amountCents, 5000, 'masked file still parses');
 });
 
 test('parser rejects a tampered file', () => {
   const file = buildAchFile({
     ...base,
-    batches: [{ secCode: 'WEB', entryDescription: 'PAYMENT', effectiveDate: new Date(2026, 9, 13), entries: [entry()] }],
+    batches: [{ secCode: 'WEB', entryDescription: 'PAYMENT', paymentTypeCode: 'S', effectiveDate: new Date(2026, 9, 13), entries: [entry()] }],
   });
   const tampered = file.content.replace('0000005000', '0000009000');
   assert.ok(parseAchFile(tampered).errors.includes('File control total debit mismatch'));
@@ -98,7 +125,7 @@ test('rejects values that overflow numeric fields', () => {
   assert.throws(() =>
     buildAchFile({
       ...base,
-      batches: [{ secCode: 'WEB', entryDescription: 'X', effectiveDate: new Date(), entries: [entry({ amountCents: 1e11 })] }],
+      batches: [{ secCode: 'WEB', entryDescription: 'X', paymentTypeCode: 'S', effectiveDate: new Date(), entries: [entry({ amountCents: 1e11 })] }],
     }),
   );
 });

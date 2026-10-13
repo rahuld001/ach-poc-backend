@@ -40,13 +40,21 @@ export function verifyCustomer({ holder_name, dob, ssn_last4, address, last4 }) 
   return { result, checked_at: new Date().toISOString(), checks };
 }
 
-/** Plaid-linked accounts: identity comes from the bank login, so only screen the name. */
-export function verifyPlaidCustomer(name) {
+/**
+ * Plaid-linked accounts: the account is verified by the bank login, and the owner name comes from Plaid Identity
+ * when the bank returns it (`nameSource` = 'bank'). Otherwise the customer typed it (`nameSource` = 'customer'),
+ * which is weaker evidence, so that is recorded as a warning.
+ */
+export function verifyPlaidCustomer(name, nameSource) {
+  const fromBank = nameSource === 'bank';
   return {
     result: isSanctioned(name) ? 'fail' : 'pass',
     checked_at: new Date().toISOString(),
     checks: [
-      check('Identity from bank login (Plaid)', true, 'Account owner name returned by the bank'),
+      check('Account verified by bank login (Plaid Auth)', true, 'Routing and account number returned by the bank'),
+      fromBank
+        ? check('Account owner name', true, 'Returned by the bank (Plaid Identity)')
+        : warn('Account owner name', 'Entered by the customer; the bank did not return owner data'),
       check('Sanctions screen (OFAC SDN list)', !isSanctioned(name), isSanctioned(name) ? 'Potential match' : 'No match'),
     ],
   };
@@ -78,7 +86,7 @@ export async function checkPayment(client, { account, direction, amount_cents })
   const { rows: [{ dupes, recent }] } = await client.query(
     `SELECT count(*) FILTER (WHERE amount_cents = $2 AND direction = $3 AND created_at > now() - interval '10 minutes')::int AS dupes,
             count(*) FILTER (WHERE created_at > now() - interval '24 hours')::int AS recent
-       FROM transfers WHERE bank_account_id = $1 AND status NOT IN ('cancelled', 'failed')`,
+       FROM transfers WHERE bank_account_id = $1 AND purpose = 'payment' AND status NOT IN ('cancelled', 'failed')`,
     [account.id, amount_cents, direction],
   );
   checks.push(dupes ? warn('Duplicate check', `${dupes} identical payment(s) in the last 10 minutes`) : check('Duplicate check', true, 'No recent identical payment'));

@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS ach_files (
   entry_hash         bigint NOT NULL,
   total_debit_cents  bigint NOT NULL,
   total_credit_cents bigint NOT NULL,
-  status             text NOT NULL CHECK (status IN ('submitted', 'processed', 'rejected')),
+  status             text NOT NULL,
   process_after      timestamptz NOT NULL,
   processed_at       timestamptz,
   bank_response      jsonb,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS transfers (
   amount_cents    int NOT NULL CHECK (amount_cents > 0),
   description     text,
   sec_code        char(3) NOT NULL,
-  status          text NOT NULL CHECK (status IN ('pending', 'submitted', 'settled', 'returned', 'cancelled', 'failed')),
+  status          text NOT NULL,
   trace_number    char(15) UNIQUE,
   ach_file_id     uuid REFERENCES ach_files(id),
   effective_date  date,
@@ -90,8 +90,10 @@ CREATE TABLE IF NOT EXISTS transfer_events (
 );
 
 CREATE SEQUENCE IF NOT EXISTS trace_seq;
+-- Trace numbers the simulated receiving banks put on return / NOC entries.
+CREATE SEQUENCE IF NOT EXISTS rdfi_trace_seq;
 
--- Which rail sends the transfer: 'mock' (our NACHA file + mock bank) or 'increase' (Increase ACH API).
+-- Which rail sends the transfer: 'mock' (our NACHA file to the simulated ODFI) or 'increase' (Increase ACH API).
 ALTER TABLE transfers ADD COLUMN IF NOT EXISTS rail text NOT NULL DEFAULT 'mock' CHECK (rail IN ('mock', 'increase'));
 ALTER TABLE transfers ADD COLUMN IF NOT EXISTS provider_transfer_id text UNIQUE;
 
@@ -105,3 +107,45 @@ CREATE TABLE IF NOT EXISTS onboarding (
 -- Simulated verification results: customer identity / sanctions / account status (per account) and pre-payment risk checks.
 ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS kyc jsonb;
 ALTER TABLE transfers ADD COLUMN IF NOT EXISTS risk jsonb;
+
+-- --- Direct ACH: bank handshake -----------------------------------------------------------------------------------
+
+-- Transfer lifecycle: pending (not yet in a file) -> submitted (in a file sent to the ODFI) -> accepted (file
+-- acknowledged by the ODFI) -> settled (effective date reached). returned / cancelled / failed are terminal.
+ALTER TABLE transfers DROP CONSTRAINT IF EXISTS transfers_status_check;
+ALTER TABLE transfers ADD CONSTRAINT transfers_status_check
+  CHECK (status IN ('pending', 'submitted', 'accepted', 'settled', 'returned', 'cancelled', 'failed'));
+
+-- What the entry is for: a customer payment, the micro-deposits that verify an account, or a reversal of an
+-- erroneous entry (same SEC code as the original, entry description REVERSAL, within 5 banking days).
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS purpose text NOT NULL DEFAULT 'payment'
+  CHECK (purpose IN ('payment', 'micro_deposit', 'reversal'));
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS reverses_transfer_id uuid REFERENCES transfers(id);
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS reversed_by_transfer_id uuid REFERENCES transfers(id);
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS settled_at timestamptz;
+-- Debits can still come back as R01-type returns for 2 banking days after settlement (60 days for unauthorized).
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS return_window_ends date;
+
+-- Files: 'origination' goes to the ODFI; 'return' comes back from it (returns and notifications of change).
+-- Origination status: submitted -> accepted -> settled, or rejected. Inbound status: received -> applied.
+ALTER TABLE ach_files DROP CONSTRAINT IF EXISTS ach_files_status_check;
+ALTER TABLE ach_files ADD CONSTRAINT ach_files_status_check
+  CHECK (status IN ('submitted', 'accepted', 'settled', 'processed', 'rejected', 'received', 'applied'));
+ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'origination' CHECK (kind IN ('origination', 'return'));
+ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS file_name text;
+ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS transport text; -- mock | sftp | upload
+ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS acknowledged_at timestamptz;
+ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS settles_at timestamptz;
+ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS effective_date date;
+
+-- Notifications of change (C01..C07) applied to an account, and any other account data corrections.
+CREATE TABLE IF NOT EXISTS account_changes (
+  id              bigserial PRIMARY KEY,
+  bank_account_id uuid NOT NULL REFERENCES bank_accounts(id),
+  transfer_id     uuid REFERENCES transfers(id),
+  change_code     char(3) NOT NULL,
+  description     text NOT NULL,
+  old_value       text,
+  new_value       text,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);

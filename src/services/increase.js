@@ -5,10 +5,11 @@ import { query, withTx } from '../db.js';
 import { decrypt } from '../crypto.js';
 import { TEST_ACCOUNT_OUTCOMES } from '../ach.js';
 import { returnTransfer, setTransferStatus } from './transfers.js';
+import { increaseSandbox } from '../config.js';
 
 const BASE_URL = (process.env.INCREASE_BASE_URL || 'https://sandbox.increase.com').replace(/\/+$/, '');
 export const increaseEnabled = Boolean(process.env.INCREASE_API_KEY);
-export const increaseSandbox = BASE_URL.includes('sandbox');
+export { increaseSandbox };
 
 // Our SEC codes -> Increase's standard_entry_class_code values.
 const SEC_CODES = { WEB: 'internet_initiated', PPD: 'prearranged_payments_and_deposit' };
@@ -81,6 +82,13 @@ async function sendTransfer(t) {
 
 const simulate = (id, step, body = {}) => call('POST', `/simulations/ach_transfers/${id}/${step}`, body);
 
+/** Sandbox: moves a transfer to "submitted". Approval-gated transfers must be approved before they can be submitted. */
+async function ensureSubmitted(remote) {
+  if (remote.status === 'pending_approval') remote = await call('POST', `/ach_transfers/${remote.id}/approve`);
+  if (['pending_submission', 'pending_reviewing'].includes(remote.status)) remote = await simulate(remote.id, 'submit');
+  return remote;
+}
+
 /** Sends every pending Increase-rail transfer to Increase. Returns how many were sent. */
 export async function sendPendingToIncrease() {
   if (!increaseEnabled) return 0;
@@ -141,20 +149,26 @@ async function applyRemote(t, remote) {
  * receiving bank after MOCK_BANK_DELAY_SECONDS: submits the entry, then settles it or returns it using the same
  * test account endings as the mock bank, so both rails behave the same in demos.
  */
+const SETTLED_POLL_MS = 60_000; // late returns are rare: check settled transfers once a minute, not every 5 seconds
+let lastSettledPoll = 0;
+
 export async function syncIncrease() {
   if (!increaseEnabled) return;
   const delay = Number(process.env.MOCK_BANK_DELAY_SECONDS ?? 15);
+  const includeSettled = Date.now() - lastSettledPoll >= SETTLED_POLL_MS;
+  if (includeSettled) lastSettledPoll = Date.now();
   const { rows } = await query(
     `SELECT t.*, a.last4 FROM transfers t JOIN bank_accounts a ON a.id = t.bank_account_id
       WHERE t.rail = 'increase' AND t.provider_transfer_id IS NOT NULL
-        AND (t.status = 'submitted' OR (t.status = 'settled' AND t.updated_at > now() - interval '1 day'))`,
+        AND (t.status = 'submitted' OR ($1 AND t.status = 'settled' AND t.updated_at > now() - interval '1 day'))`,
+    [includeSettled],
   );
   for (const t of rows) {
     try {
       let remote = await call('GET', `/ach_transfers/${t.provider_transfer_id}`);
       const due = Date.now() - new Date(t.updated_at).getTime() >= delay * 1000;
       if (increaseSandbox && t.status === 'submitted' && due && !remote.settlement && remote.status !== 'returned') {
-        if (['pending_submission', 'pending_approval'].includes(remote.status)) remote = await simulate(remote.id, 'submit');
+        remote = await ensureSubmitted(remote);
         const code = TEST_ACCOUNT_OUTCOMES[t.last4];
         remote = code ? await simulate(remote.id, 'return', { reason: RETURN_REASONS[code] }) : await simulate(remote.id, 'settle');
       }
@@ -168,8 +182,7 @@ export async function syncIncrease() {
 /** Sandbox buttons: settle or return an Increase-rail transfer right away. */
 export async function simulateOnIncrease(t, action, returnCode) {
   if (!increaseSandbox) throw new Error('Simulations only work against the Increase sandbox');
-  let remote = await call('GET', `/ach_transfers/${t.provider_transfer_id}`);
-  if (['pending_submission', 'pending_approval'].includes(remote.status)) remote = await simulate(remote.id, 'submit');
+  let remote = await ensureSubmitted(await call('GET', `/ach_transfers/${t.provider_transfer_id}`));
   if (action === 'settle') remote = await simulate(remote.id, 'settle');
   else {
     if (!RETURN_REASONS[returnCode]) throw new Error(`No Increase return reason mapped for ${returnCode}`);
