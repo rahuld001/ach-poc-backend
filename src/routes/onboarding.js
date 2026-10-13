@@ -28,7 +28,10 @@ const isSanctioned = (name) => /ofac\s*test/i.test(name ?? '');
 const VALIDATE = {
   business: (d) => {
     required(d, ['legal_name', 'ein', 'entity_type', 'address', 'website', 'description']);
-    if (!/^\d{2}-\d{7}$/.test(d.ein)) throw new HttpError(400, 'EIN must look like 12-3456789');
+    // An EIN is 9 digits; accept it with or without the dash and store it as 12-3456789.
+    const digits = String(d.ein).replace(/\D/g, '');
+    if (digits.length !== 9) throw new HttpError(400, 'EIN must be 9 digits (for example 12-3456789)');
+    d.ein = `${digits.slice(0, 2)}-${digits.slice(2)}`;
   },
   owner: (d) => {
     required(d, ['full_name', 'dob', 'ssn_last4', 'address', 'title', 'ownership_pct']);
