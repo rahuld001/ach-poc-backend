@@ -15,7 +15,7 @@ export async function runBatch() {
     const { rows: pending } = await client.query(
       `SELECT t.*, a.routing_number, a.account_number_enc, a.account_type, a.holder_name, a.status AS account_status
          FROM transfers t JOIN bank_accounts a ON a.id = t.bank_account_id
-        WHERE t.status = 'pending'
+        WHERE t.status = 'pending' AND t.rail = 'mock'
         ORDER BY t.created_at
         FOR UPDATE OF t SKIP LOCKED`,
     );

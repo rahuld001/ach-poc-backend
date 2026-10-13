@@ -35,6 +35,7 @@ Check it's up: `curl http://localhost:4000/api/health` returns `{"ok":true}`.
 | `DATABASE_URL` | PostgreSQL connection string |
 | `ENCRYPTION_KEY` | Long random string used to encrypt account numbers and Plaid tokens |
 | `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` | Plaid sandbox keys. Leave blank to use manual entry only |
+| `INCREASE_API_KEY`, `INCREASE_BASE_URL`, `INCREASE_ACCOUNT_ID` | Optional Increase rail (real ACH API). Leave blank for mock bank only |
 | `ODFI_ROUTING`, `ODFI_NAME`, `COMPANY_NAME`, `COMPANY_ID` | Originator details written into the NACHA file |
 | `BATCH_INTERVAL_SECONDS` | How often pending payments are batched (0 = manual only) |
 | `MOCK_BANK_DELAY_SECONDS` | Delay before the mock bank processes a file |
@@ -65,7 +66,7 @@ written to the `transfer_events` audit table.
 | `src/crypto.js` | AES-256-GCM encrypt/decrypt |
 | `src/plaid.js` | Plaid client |
 | `src/routes/` | `accounts`, `transfers`, `achFiles`, `sandbox` (test-mode simulations) |
-| `src/services/` | `batcher`, `mockBank`, `transfers` (status changes + audit trail) |
+| `src/services/` | `batcher`, `mockBank`, `increase` (Increase rail), `transfers` (status changes + audit trail) |
 | `test/` | Unit tests |
 
 ## API
@@ -94,6 +95,20 @@ POST   /api/sandbox/process-bank
 | anything else | Settles |
 
 Valid test routing numbers: `011401533`, `021000021`. Plaid sandbox login: `user_good` / `pass_good`.
+
+## Payment rails
+Each payment chooses a rail (`rail` in `POST /api/transfers`, picked on the New Payment screen):
+
+| Rail | How the money moves |
+|---|---|
+| `mock` (default) | Our own NACHA file, settled or returned by the simulated bank in `src/services/mockBank.js` |
+| `increase` | Real bank-to-bank ACH through the [Increase](https://increase.com) API, which originates the entry through its partner bank |
+
+Increase setup: put a key in `INCREASE_API_KEY` (sandbox by default; `INCREASE_BASE_URL=https://api.increase.com` for live
+money) and optionally `INCREASE_ACCOUNT_ID` (otherwise the first open account is used). Pending Increase payments are
+sent on each batch run; their status is polled every 5 seconds (`src/services/increase.js`). In the sandbox the app
+also plays the receiving bank, settling or returning entries by the same test account endings as the mock bank, and
+the sandbox Settle/Return buttons call Increase's simulation endpoints. Production would add Increase webhooks.
 
 ## Deploying on Vercel
 `src/index.js` exports the Express app, which Vercel runs as a serverless function.

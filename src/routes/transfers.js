@@ -2,12 +2,14 @@ import { Router } from 'express';
 import { query, withTx } from '../db.js';
 import { secCodeFor } from '../ach.js';
 import { HttpError, setTransferStatus } from '../services/transfers.js';
+import { increaseEnabled } from '../services/increase.js';
 
 const router = Router();
 
 const LIST_SQL = `
   SELECT t.id, t.direction, t.amount_cents, t.description, t.sec_code, t.status, t.trace_number,
          t.ach_file_id, t.effective_date, t.return_code, t.return_reason, t.created_at, t.updated_at,
+         t.rail, t.provider_transfer_id,
          a.id AS bank_account_id, a.holder_name, a.institution_name, a.last4, a.account_type
     FROM transfers t JOIN bank_accounts a ON a.id = t.bank_account_id`;
 
@@ -33,7 +35,7 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { bank_account_id, direction, amount_cents, description, authorization } = req.body ?? {};
+  const { bank_account_id, direction, amount_cents, description, authorization, rail = 'mock' } = req.body ?? {};
   const idempotencyKey = req.get('Idempotency-Key') || null;
 
   if (idempotencyKey) {
@@ -42,6 +44,8 @@ router.post('/', async (req, res) => {
   }
 
   if (!['debit', 'credit'].includes(direction)) throw new HttpError(400, 'direction must be debit or credit');
+  if (!['mock', 'increase'].includes(rail)) throw new HttpError(400, 'rail must be mock or increase');
+  if (rail === 'increase' && !increaseEnabled) throw new HttpError(400, 'The Increase rail is not configured (set INCREASE_API_KEY)');
   if (!Number.isInteger(amount_cents) || amount_cents <= 0) throw new HttpError(400, 'amount_cents must be a positive integer');
   const max = Number(process.env.MAX_TRANSFER_CENTS ?? 1_000_000);
   if (amount_cents > max) throw new HttpError(400, `Amount exceeds per-transfer limit of $${(max / 100).toFixed(2)}`);
@@ -67,9 +71,9 @@ router.post('/', async (req, res) => {
       [bank_account_id, authorization.text, req.ip, req.get('User-Agent') ?? null],
     );
     const { rows: [t] } = await client.query(
-      `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7) RETURNING id`,
-      [bank_account_id, mandate.id, direction, amount_cents, description ?? null, secCodeFor(direction), idempotencyKey],
+      `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, idempotency_key, rail)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8) RETURNING id`,
+      [bank_account_id, mandate.id, direction, amount_cents, description ?? null, secCodeFor(direction), idempotencyKey, rail],
     );
     await client.query(`INSERT INTO transfer_events (transfer_id, status, note) VALUES ($1, 'pending', 'Transfer created')`, [t.id]);
     return t;

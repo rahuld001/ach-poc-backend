@@ -90,3 +90,7 @@ CREATE TABLE IF NOT EXISTS transfer_events (
 );
 
 CREATE SEQUENCE IF NOT EXISTS trace_seq;
+
+-- Which rail sends the transfer: 'mock' (our NACHA file + mock bank) or 'increase' (Increase ACH API).
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS rail text NOT NULL DEFAULT 'mock' CHECK (rail IN ('mock', 'increase'));
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS provider_transfer_id text UNIQUE;

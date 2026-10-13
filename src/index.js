@@ -6,6 +6,7 @@ import { plaidEnabled } from './plaid.js';
 import { RETURN_CODES, TEST_ACCOUNT_OUTCOMES } from './ach.js';
 import { runBatch } from './services/batcher.js';
 import { processDueFiles } from './services/mockBank.js';
+import { increaseEnabled, increaseSandbox, sendPendingToIncrease, syncIncrease } from './services/increase.js';
 import accounts from './routes/accounts.js';
 import transfers from './routes/transfers.js';
 import achFiles from './routes/achFiles.js';
@@ -58,6 +59,8 @@ app.get('/api/config', (_req, res) =>
   res.json({
     mode: API_KEY.startsWith('sk_test_') ? 'test' : 'live',
     plaid_enabled: plaidEnabled,
+    rails: { mock: true, increase: increaseEnabled },
+    increase_env: increaseEnabled ? (increaseSandbox ? 'sandbox' : 'production') : null,
     return_codes: RETURN_CODES,
     test_account_outcomes: TEST_ACCOUNT_OUTCOMES,
     limits: {
@@ -85,6 +88,8 @@ app.use((err, _req, res, _next) => {
 const JOBS = [
   { name: 'batcher', seconds: Number(process.env.BATCH_INTERVAL_SECONDS ?? 60), fn: runBatch },
   { name: 'mock-bank', seconds: 5, fn: processDueFiles },
+  { name: 'increase-send', seconds: Number(process.env.BATCH_INTERVAL_SECONDS ?? 60), fn: sendPendingToIncrease },
+  { name: 'increase-sync', seconds: 5, fn: syncIncrease },
 ];
 
 // Express on Vercel runs as a serverless function: no long-lived process, so no timers. Export the app for it,

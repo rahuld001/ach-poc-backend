@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { query } from '../db.js';
 import { runBatch } from '../services/batcher.js';
+import { sendPendingToIncrease } from '../services/increase.js';
 import { HttpError } from '../services/transfers.js';
 
 const router = Router();
@@ -15,7 +16,8 @@ router.get('/', async (_req, res) => {
 
 router.post('/run', async (_req, res) => {
   const file = await runBatch();
-  res.json(file ? { file } : { file: null, message: 'No pending transfers to batch' });
+  const increaseSent = await sendPendingToIncrease();
+  res.json({ file, increase_sent: increaseSent, ...(!file && !increaseSent && { message: 'No pending transfers to batch' }) });
 });
 
 router.get('/:id', async (req, res) => {
