@@ -6,6 +6,7 @@ import { authorizationText, isValidRoutingNumber } from '../ach.js';
 import { createLinkToken, exchangeAndGetAuth, plaidEnabled } from '../plaid.js';
 import { HttpError } from '../services/transfers.js';
 import { verifyCustomer, verifyPlaidCustomer } from '../services/verification.js';
+import { holdForTransfer } from '../services/ledger.js';
 import { isTestMode } from '../config.js';
 
 const router = Router();
@@ -92,6 +93,7 @@ router.post('/', async (req, res) => {
       ['debit', amounts[0] + amounts[1]],
     ];
     for (const [direction, cents] of entries) {
+      await holdForTransfer(client, { direction, amount_cents: cents }); // the two credits are paid from the operating account
       const { rows: [t] } = await client.query(
         `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, rail, purpose)
          VALUES ($1, $2, $3, $4, 'Account verification', 'PPD', 'pending', 'mock', 'micro_deposit') RETURNING id`,

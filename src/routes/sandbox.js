@@ -5,6 +5,7 @@ import { RETURN_CODES } from '../ach.js';
 import { runOdfiJobs, settleTransfer } from '../services/odfi/index.js';
 import { simulateReturn } from '../services/odfi/mock.js';
 import { HttpError } from '../services/transfers.js';
+import { post } from '../services/ledger.js';
 import { simulateOnIncrease } from '../services/increase.js';
 
 const router = Router();
@@ -48,6 +49,14 @@ router.post('/transfers/:id/return', async (req, res) => {
   }
   const result = await simulateReturn(t, code);
   res.json({ ok: true, file: result.file, results: result.results });
+});
+
+// Put simulated money on the operating account (in real life: a wire or ACH credit from the business's own bank).
+router.post('/fund', async (req, res) => {
+  const cents = Number(req.body?.amount_cents);
+  if (!Number.isInteger(cents) || cents <= 0 || cents > 100_000_000) throw new HttpError(400, 'amount_cents must be a positive integer up to $1,000,000');
+  const acct = await withTx((client) => post(client, { type: 'funding', amountCents: cents, note: 'Simulated funding (sandbox)' }));
+  res.json({ balance_cents: Number(acct.balance_cents), held_cents: Number(acct.held_cents) });
 });
 
 // Advance the simulated bank clock: acknowledge, settle and return everything that is in flight, right now.

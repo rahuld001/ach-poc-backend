@@ -138,6 +138,24 @@ ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS acknowledged_at timestamptz;
 ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS settles_at timestamptz;
 ALTER TABLE ach_files ADD COLUMN IF NOT EXISTS effective_date date;
 
+-- Simulated operating account: the money the business moves. Payouts hold funds until they settle; collections
+-- post when they settle; returns take the money back plus the bank's return fee. Nothing here is real money.
+CREATE TABLE IF NOT EXISTS operating_account (
+  id            int PRIMARY KEY CHECK (id = 1),
+  balance_cents bigint NOT NULL DEFAULT 0,
+  held_cents    bigint NOT NULL DEFAULT 0,
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id            bigserial PRIMARY KEY,
+  transfer_id   uuid REFERENCES transfers(id),
+  type          text NOT NULL CHECK (type IN ('opening', 'funding', 'collection', 'payout', 'return', 'return_fee', 'reversal')),
+  amount_cents  bigint NOT NULL,
+  balance_after bigint NOT NULL,
+  note          text,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
 -- Notifications of change (C01..C07) applied to an account, and any other account data corrections.
 CREATE TABLE IF NOT EXISTS account_changes (
   id              bigserial PRIMARY KEY,

@@ -11,6 +11,7 @@ import { increaseEnabled, increaseSandbox, sendPendingToIncrease, syncIncrease }
 import accounts from './routes/accounts.js';
 import transfers from './routes/transfers.js';
 import achFiles from './routes/achFiles.js';
+import ledger from './routes/ledger.js';
 import sandbox from './routes/sandbox.js';
 import onboarding from './routes/onboarding.js';
 
@@ -89,6 +90,7 @@ app.get('/api/config', (_req, res) =>
 app.use('/api/accounts', accounts);
 app.use('/api/transfers', transfers);
 app.use('/api/ach-files', achFiles);
+app.use('/api/ledger', ledger);
 if (isTestMode) app.use('/api/sandbox', sandbox); // simulation endpoints do not exist in live mode
 app.use('/api/onboarding', onboarding);
 

@@ -4,8 +4,9 @@
 // Nothing here contacts a real bank, credit bureau or sanctions list.
 import crypto from 'node:crypto';
 import { Router } from 'express';
-import { query } from '../db.js';
+import { query, withTx } from '../db.js';
 import { HttpError } from '../services/transfers.js';
+import { post } from '../services/ledger.js';
 
 const router = Router();
 
@@ -198,7 +199,7 @@ const save = (state) =>
   );
 
 // Finishes any review whose time is up. Called on every read, so it also works on serverless hosts.
-function resolveReviews(state) {
+async function resolveReviews(state) {
   let changed = false;
   for (const name of STEPS) {
     const step = state.steps[name];
@@ -206,22 +207,29 @@ function resolveReviews(state) {
       const decision = DECIDE[name](step.data, state);
       Object.assign(step, { status: decision.status, decision, decided_at: new Date().toISOString() });
       changed = true;
+      // The funding wire / ACH credit lands on the (simulated) operating account.
+      if (name === 'funding' && decision.status === 'approved') {
+        const cents = Math.round(Number(step.data.amount_usd) * 100);
+        await withTx((client) => post(client, { type: 'funding', amountCents: cents, note: `${step.data.method === 'wire' ? 'Fedwire' : 'ACH credit'} received: initial funding (simulated)` }));
+      }
     }
   }
   return changed;
 }
 
+const allApproved = (state) => STEPS.every((s) => state.steps[s]?.status === 'approved');
+
 router.get('/', async (_req, res) => {
   const state = await load();
-  if (resolveReviews(state)) await save(state);
-  res.json({ ...state, order: STEPS, review_seconds: REVIEW_SECONDS });
+  if (await resolveReviews(state)) await save(state);
+  res.json({ ...state, order: STEPS, review_seconds: REVIEW_SECONDS, live: allApproved(state) });
 });
 
 router.post('/:step', async (req, res) => {
   const name = req.params.step;
   if (!STEPS.includes(name)) throw new HttpError(404, 'Unknown onboarding step');
   const state = await load();
-  resolveReviews(state);
+  await resolveReviews(state);
   const previous = STEPS.slice(0, STEPS.indexOf(name)).find((s) => state.steps[s].status !== 'approved');
   if (previous) throw new HttpError(409, `Finish the "${previous}" step first`);
   if (['in_review', 'approved'].includes(state.steps[name].status)) {

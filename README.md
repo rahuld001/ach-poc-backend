@@ -82,7 +82,12 @@ refuses to start otherwise), `/api/sandbox/*` returns 404 and micro-deposit amou
    account number or account type and are logged in `account_changes`. Files can also be pasted through the API.
 7. **Reversals.** A settled payment can be reversed within 5 banking days: an opposite entry in the same SEC code with
    entry description `REVERSAL`, no new authorization needed.
-8. **Monitoring.** `GET /api/transfers/return-rates` reports the 60-day unauthorized, administrative and overall debit
+8. **Operating account** (`src/services/ledger.js`). A simulated balance the business moves money through: funded by
+   the Go Live funding step (test mode also starts with `SIM_OPENING_BALANCE_CENTS`, default $10,000, and has a
+   sandbox top-up), payouts and verification credits are held when created and paid when they settle, collections
+   post on settlement, returns take the money back plus `RETURN_FEE_CENTS` (default $2.50). A payout the available
+   balance cannot cover is refused. `GET /api/ledger` returns balance, held, available and the entries.
+9. **Monitoring.** `GET /api/transfers/return-rates` reports the 60-day unauthorized, administrative and overall debit
    return rates against the Nacha thresholds (0.5%, 3%, 15%). Every status change is written to `transfer_events`.
 
 Payment statuses: `pending → submitted → accepted → settled`, plus `returned`, `cancelled` and `failed`.

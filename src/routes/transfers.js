@@ -5,6 +5,7 @@ import {
   addBankingDays, authorizationText, secCodeFor, toIsoDate,
 } from '../ach.js';
 import { HttpError, setTransferStatus } from '../services/transfers.js';
+import { holdForTransfer } from '../services/ledger.js';
 import { increaseEnabled } from '../services/increase.js';
 import { checkPayment } from '../services/verification.js';
 
@@ -120,6 +121,8 @@ router.post('/', async (req, res) => {
        VALUES ($1, $2, $3, $4) RETURNING id`,
       [bank_account_id, authorizationText(direction, amount_cents, account.last4), req.ip, req.get('User-Agent') ?? null],
     );
+    // A payout is paid from the operating account: reserve the (simulated) money now, or refuse the payment.
+    await holdForTransfer(client, { direction, amount_cents });
     const { rows: [t] } = await client.query(
       `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, idempotency_key, rail, risk, purpose)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9, 'payment') RETURNING id`,
@@ -156,6 +159,7 @@ router.post('/:id/reverse', async (req, res) => {
     const deadline = toIsoDate(addBankingDays(new Date(t.settled_at), REVERSAL_WINDOW_BANKING_DAYS));
     if (toIsoDate(new Date()) > deadline) throw new HttpError(409, `The 5 banking day reversal window closed on ${deadline}`);
 
+    await holdForTransfer(client, { direction: t.direction === 'debit' ? 'credit' : 'debit', amount_cents: t.amount_cents });
     const { rows: [r] } = await client.query(
       `INSERT INTO transfers (bank_account_id, mandate_id, direction, amount_cents, description, sec_code, status, rail, purpose, reverses_transfer_id)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', 'mock', 'reversal', $7) RETURNING id`,

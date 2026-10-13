@@ -1,4 +1,5 @@
 import { DISABLING_RETURN_CODES, RETURN_CODES } from '../ach.js';
+import { applyStatusChange } from './ledger.js';
 
 export class HttpError extends Error {
   constructor(status, message, details) {
@@ -8,8 +9,12 @@ export class HttpError extends Error {
   }
 }
 
-/** Updates a transfer's status and writes an audit event, inside the caller's transaction. */
+/**
+ * Updates a transfer's status, writes an audit event and moves the simulated money on the operating account,
+ * inside the caller's transaction. Every rail and every path (bank files, sandbox, Increase) goes through here.
+ */
 export async function setTransferStatus(client, transferId, status, note, extra = {}) {
+  const { rows: [prev] } = await client.query('SELECT * FROM transfers WHERE id = $1', [transferId]);
   const cols = Object.keys(extra);
   const sets = cols.map((c, i) => `${c} = $${i + 3}`);
   await client.query(
@@ -21,6 +26,7 @@ export async function setTransferStatus(client, transferId, status, note, extra 
     status,
     note ?? null,
   ]);
+  if (prev) await applyStatusChange(client, prev, status);
 }
 
 /** Marks a transfer returned and disables the bank account if the return code requires it. */
