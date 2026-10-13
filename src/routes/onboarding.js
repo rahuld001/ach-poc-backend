@@ -151,16 +151,37 @@ const DECIDE = {
     };
   },
 
-  live: (_d, state) => ({
-    status: 'approved',
-    checks: [
-      check('All onboarding steps approved', STEPS.slice(0, -1).every((s) => state.steps[s]?.status === 'approved'), 'KYB, KYC, provider, compliance, funding'),
-      check('Live API key issued', true, `sk_live_••••${crypto.randomBytes(2).toString('hex')} (simulated, not usable)`),
-      check('Webhook endpoint registered', true, 'https://ach-poc-backend.vercel.app/webhooks/ach (simulated)'),
-      check('Test-to-live checklist', true, 'Remove sandbox endpoints, rotate secrets, enable monitoring'),
-    ],
-    notes: ['Ready to go live. In production you would now set the live keys in the backend and switch INCREASE_BASE_URL to https://api.increase.com.'],
-  }),
+  live: (_d, state) => {
+    const bank = state.steps.provider?.data?.provider !== 'increase';
+    const key = `sk_live_••••${crypto.randomBytes(2).toString('hex')} (simulated, not usable)`;
+    const all = check('All onboarding steps approved', STEPS.slice(0, -1).every((s) => state.steps[s]?.status === 'approved'), 'KYB, KYC, bank approval, compliance, funding');
+    if (bank) {
+      return {
+        status: 'approved',
+        checks: [
+          all,
+          check('Company ID assigned by the ODFI', true, `${process.env.COMPANY_ID || '1234567890'} is written as Immediate Origin / Company Identification in every file`),
+          check('SFTP connection and PGP keys exchanged', true, 'Outbound folder for origination files; inbound folder for acknowledgments, returns and NOCs (simulated)'),
+          check('Cut-off schedule received', true, 'Files delivered by 2:00 PM ET settle on the next banking day; later files roll to the following day'),
+          check('Live API key issued', true, key),
+          check('Sandbox shortcuts switched off', true, 'With a live key the server has no /sandbox routes and never reveals micro-deposit amounts'),
+        ],
+        notes: [
+          'Ready to originate ACH. Point the backend at the bank (ODFI_TRANSPORT=sftp with the SFTP details and a live API_KEY): the same NACHA files this POC produces go to the ODFI, and its acknowledgment, return and NOC files flow back through the same processing. The payment screens do not change.',
+        ],
+      };
+    }
+    return {
+      status: 'approved',
+      checks: [
+        all,
+        check('Live API key issued', true, key),
+        check('Webhook endpoint registered', true, 'https://ach-poc-backend.vercel.app/webhooks/ach (simulated)'),
+        check('Sandbox shortcuts switched off', true, 'With a live key the server has no /sandbox routes'),
+      ],
+      notes: ['Ready to go live through Increase: set the live keys in the backend and switch INCREASE_BASE_URL to https://api.increase.com.'],
+    };
+  },
 };
 
 const emptyState = () => ({ steps: Object.fromEntries(STEPS.map((s) => [s, { status: 'not_started' }])) });
