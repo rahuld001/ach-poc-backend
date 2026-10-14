@@ -156,6 +156,18 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
+-- People who sign in (required in live mode). Roles: admin, operator, viewer.
+CREATE TABLE IF NOT EXISTS users (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email         text NOT NULL UNIQUE,
+  name          text,
+  role          text NOT NULL CHECK (role IN ('admin', 'operator', 'viewer')),
+  password_hash text NOT NULL,
+  disabled      boolean NOT NULL DEFAULT false,
+  last_login_at timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
 -- Notifications of change (C01..C07) applied to an account, and any other account data corrections.
 CREATE TABLE IF NOT EXISTS account_changes (
   id              bigserial PRIMARY KEY,

@@ -18,6 +18,33 @@ const cfg = {
   processedDir: process.env.SFTP_PROCESSED_DIR || '/inbound/processed',
 };
 
+// PGP: files to the bank are encrypted with the bank's public key; files from the bank are decrypted with ours.
+// Keys are ASCII-armored, passed in env (literal \n escapes allowed). Needs `npm install openpgp`.
+const pgpKey = (name) => process.env[name]?.replace(/\\n/g, '\n');
+async function pgp() {
+  try {
+    return await import('openpgp');
+  } catch {
+    throw new Error('PGP keys are configured but the openpgp package is missing: npm install openpgp');
+  }
+}
+export async function encryptForBank(content) {
+  const armored = pgpKey('ODFI_PGP_PUBLIC_KEY');
+  if (!armored) return content;
+  const openpgp = await pgp();
+  const encryptionKeys = await openpgp.readKey({ armoredKey: armored });
+  return openpgp.encrypt({ message: await openpgp.createMessage({ text: content }), encryptionKeys });
+}
+export async function decryptFromBank(content) {
+  const armored = pgpKey('COMPANY_PGP_PRIVATE_KEY');
+  if (!armored || !content.includes('BEGIN PGP MESSAGE')) return content;
+  const openpgp = await pgp();
+  let privateKey = await openpgp.readPrivateKey({ armoredKey: armored });
+  if (process.env.COMPANY_PGP_PASSPHRASE) privateKey = await openpgp.decryptKey({ privateKey, passphrase: process.env.COMPANY_PGP_PASSPHRASE });
+  const { data } = await openpgp.decrypt({ message: await openpgp.readMessage({ armoredMessage: content }), decryptionKeys: privateKey });
+  return data;
+}
+
 async function connect() {
   if (!cfg.host || !cfg.username) throw new Error('ODFI_TRANSPORT=sftp needs SFTP_HOST and SFTP_USERNAME');
   let Sftp;
@@ -35,8 +62,9 @@ async function connect() {
 export async function send({ fileName, content }) {
   const client = await connect();
   try {
-    // BANK-SPECIFIC: most ODFIs require the body PGP-encrypted with their public key before upload.
-    await client.put(Buffer.from(content, 'ascii'), `${cfg.outboundDir}/${fileName}`);
+    const body = await encryptForBank(content); // PGP when ODFI_PGP_PUBLIC_KEY is set
+    const name = body === content ? fileName : `${fileName}.pgp`;
+    await client.put(Buffer.from(body, 'ascii'), `${cfg.outboundDir}/${name}`);
   } finally {
     await client.end();
   }
@@ -73,7 +101,7 @@ export async function collectInbound() {
     for (const entry of listing.filter((e) => e.type === '-')) {
       const { rows: [seen] } = await query(`SELECT 1 FROM ach_files WHERE kind = 'return' AND file_name = $1`, [entry.name]);
       if (seen) continue;
-      const content = (await client.get(`${cfg.inboundDir}/${entry.name}`)).toString('ascii');
+      const content = await decryptFromBank((await client.get(`${cfg.inboundDir}/${entry.name}`)).toString('ascii'));
       await applyInboundFile(content, { transport: 'sftp', fileName: entry.name });
       await client.rename(`${cfg.inboundDir}/${entry.name}`, `${cfg.processedDir}/${entry.name}`).catch(() => {});
       applied++;

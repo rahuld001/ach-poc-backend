@@ -116,11 +116,31 @@ which go through the same `applyInboundFile` as the simulation. Marked `BANK-SPE
 the ODFI's origination guide: PGP encryption of the file body, file naming, the acknowledgment file format, cut-off
 times. Install the client with `npm install ssh2-sftp-client`.
 
+## Simulated and real environments
+The UI has a **Simulated / Real** switch (simulated by default). The two are separate deployments of this backend,
+each with its own database, so simulated and real records can never mix:
+
+| | Simulated | Real |
+|---|---|---|
+| `API_KEY` | `sk_test_…` | live key (server-to-server only, never in a browser) |
+| Sign-in | not needed (the test key is shared) | required; roles admin, operator, viewer |
+| Bank | in-process simulated ODFI | `ODFI_TRANSPORT=sftp` with the bank's SFTP and PGP details |
+| Jobs | in the API process | `RUN_JOBS=false` on the API plus `npm run worker` as an always-on process |
+| Files sent | every batch interval | at `ACH_CUTOFFS` (US Eastern), banking days only |
+
+Real environment setup: set `SESSION_SECRET`, `ENCRYPTION_KEY`, `ADMIN_EMAIL` and `ADMIN_PASSWORD` (first admin, created
+when there are no users), the SFTP and PGP variables, then point the UI's `VITE_REAL_API_URL` at it. Admins add other
+users from **Explore → Users**. Viewers are read only. Still open before real money moves: the bank's acknowledgment
+file format, bank certification testing, a real identity and sanctions provider, and daily reconciliation with the
+bank's statements.
+
 ## Project layout
 | Path | Contents |
 |---|---|
 | `src/index.js` | Express app, API key auth, background jobs (batcher, bank side, Increase) |
-| `src/config.js` | Test/live mode, originator details, simulation clock, startup checks |
+| `src/config.js` | Test/live mode, originator details, simulation clock, cut-offs, startup checks |
+| `src/auth.js`, `src/routes/auth.js` | Users, roles, sign-in sessions |
+| `src/jobs.js`, `src/worker.js` | Background jobs, cut-off scheduling, standalone worker |
 | `src/schema.sql` | Database schema (applied on start, safe to re-run) |
 | `src/nacha.js` | NACHA file builder and parser, including addenda (returns, NOCs) and masking |
 | `src/ach.js` | Routing checksum, return and NOC codes, banking-day calendar, authorization templates |

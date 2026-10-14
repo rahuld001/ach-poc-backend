@@ -97,7 +97,13 @@ export async function runBatch() {
 
     const file = buildAchFile({ ...ORIGINATOR, fileIdModifier, batches });
     const now = new Date();
-    const fileName = `${ORIGINATOR.companyId}_${toIsoDate(now).replace(/-/g, '')}_${fileIdModifier}.ach`;
+    // BANK-SPECIFIC naming: ACH_FILE_NAME_TEMPLATE with {companyId} {date} {time} {modifier}.
+    const pad = (n) => String(n).padStart(2, '0');
+    const fileName = (process.env.ACH_FILE_NAME_TEMPLATE || '{companyId}_{date}_{modifier}.ach')
+      .replaceAll('{companyId}', ORIGINATOR.companyId)
+      .replaceAll('{date}', toIsoDate(now).replace(/-/g, ''))
+      .replaceAll('{time}', pad(now.getHours()) + pad(now.getMinutes()))
+      .replaceAll('{modifier}', fileIdModifier);
 
     const { rows: [row] } = await client.query(
       `INSERT INTO ach_files (kind, file_id_modifier, content, batch_count, entry_count, entry_hash, total_debit_cents,

@@ -1,13 +1,15 @@
 import 'dotenv/config'; // must stay first: other modules read process.env on import
-import { API_KEY, ORIGINATOR, SIM, isTestMode } from './config.js'; // second: validates the environment before anything else loads
+import { CUTOFFS, ORIGINATOR, SIM, isTestMode } from './config.js'; // second: validates the environment before anything else loads
 import express from 'express';
 import cors from 'cors';
 import { initDb } from './db.js';
 import { plaidEnabled } from './plaid.js';
 import { AUTHORIZATION_TEMPLATES, NOC_CODES, RETURN_CODES, TEST_ACCOUNT_OUTCOMES, TEST_NOC_OUTCOMES } from './ach.js';
-import { runBatch } from './services/batcher.js';
-import { runOdfiJobs, transportName } from './services/odfi/index.js';
-import { increaseEnabled, increaseSandbox, sendPendingToIncrease, syncIncrease } from './services/increase.js';
+import { transportName } from './services/odfi/index.js';
+import { increaseEnabled, increaseSandbox } from './services/increase.js';
+import { JOBS, startJobs } from './jobs.js';
+import { authenticate, enforceRole, seedAdmin } from './auth.js';
+import { privateAuth, publicAuth } from './routes/auth.js';
 import accounts from './routes/accounts.js';
 import transfers from './routes/transfers.js';
 import achFiles from './routes/achFiles.js';
@@ -28,7 +30,7 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }));
 let dbReady;
 app.use('/api', async (_req, res, next) => {
   try {
-    await (dbReady ??= initDb());
+    await (dbReady ??= initDb().then(seedAdmin));
     next();
   } catch (err) {
     dbReady = undefined; // retry on the next request
@@ -37,12 +39,11 @@ app.use('/api', async (_req, res, next) => {
   }
 });
 
-// API key auth (mimics provider-style secret keys).
-app.use('/api', (req, res, next) => {
-  const token = req.get('Authorization')?.replace(/^Bearer\s+/i, '');
-  if (!token || token !== API_KEY) return res.status(401).json({ error: 'Invalid API key' });
-  next();
-});
+// Sign-in and roles. /api/auth/status and /api/auth/login are public; everything else needs the test API key (test
+// mode) or a signed-in user (live mode; the live API key is for server-to-server calls only).
+app.use('/api/auth', publicAuth);
+app.use('/api/auth', privateAuth);
+app.use('/api', authenticate, enforceRole);
 
 // Serverless stand-in for the timers below: run any job that is due before handling the request. The UI polls
 // every few seconds, so payments still move pending → submitted → accepted → settled on their own while it is open.
@@ -57,7 +58,7 @@ if (process.env.VERCEL) {
   });
 }
 
-app.get('/api/config', (_req, res) =>
+app.get('/api/config', (req, res) =>
   res.json({
     mode: isTestMode ? 'test' : 'live',
     authorization_templates: AUTHORIZATION_TEMPLATES,
@@ -71,6 +72,8 @@ app.get('/api/config', (_req, res) =>
       balanced: ORIGINATOR.balanced,
     },
     simulation: { banking_day_seconds: SIM.bankingDaySeconds, ack_seconds: SIM.ackSeconds },
+    cutoffs_et: CUTOFFS,
+    user: req.user,
     plaid_enabled: plaidEnabled,
     rails: { mock: true, increase: increaseEnabled },
     increase_env: increaseEnabled ? (increaseSandbox ? 'sandbox' : 'production') : null,
@@ -102,22 +105,14 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: err.response?.data?.error_message || 'Internal server error' });
 });
 
-const JOBS = [
-  { name: 'batcher', seconds: Number(process.env.BATCH_INTERVAL_SECONDS ?? 60), fn: runBatch },
-  { name: 'odfi', seconds: 3, fn: runOdfiJobs }, // acknowledgments, settlement, returns and NOCs from the bank
-  { name: 'increase-send', seconds: Number(process.env.BATCH_INTERVAL_SECONDS ?? 60), fn: sendPendingToIncrease },
-  { name: 'increase-sync', seconds: 5, fn: syncIncrease },
-];
-
 // Express on Vercel runs as a serverless function: no long-lived process, so no timers. Export the app for it,
 // and only listen and start timers when running as a normal server.
 export default app;
 
 if (!process.env.VERCEL) {
-  await (dbReady ??= initDb());
-  for (const job of JOBS.filter((j) => j.seconds > 0)) {
-    setInterval(() => job.fn().catch((e) => console.error(`[${job.name}]`, e.message)), job.seconds * 1000);
-  }
+  await (dbReady ??= initDb().then(seedAdmin));
+  // RUN_JOBS=false when a separate `npm run worker` process runs the jobs (recommended with a real bank).
+  if (process.env.RUN_JOBS !== 'false') startJobs();
   const port = Number(process.env.PORT ?? 4000);
   app.listen(port, () =>
     console.log(`ACH POC API on http://localhost:${port} (ODFI transport: ${transportName}, plaid: ${plaidEnabled ? 'on' : 'off'})`),

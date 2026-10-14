@@ -25,6 +25,12 @@ export const ORIGINATOR = {
 /** How files reach the ODFI: 'mock' (simulated bank in this process) or 'sftp' (real bank drop folder). */
 export const ODFI_TRANSPORT = process.env.ODFI_TRANSPORT || 'mock';
 
+/**
+ * Bank cut-off times (HH:MM, US Eastern). When set, pending entries are only sent at these times, the way a real ODFI
+ * schedules files. Empty = send on every batch interval (the simulated default).
+ */
+export const CUTOFFS = String(process.env.ACH_CUTOFFS ?? '').split(',').map((s) => s.trim()).filter((s) => /^\d{2}:\d{2}$/.test(s)).sort();
+
 /** Simulation clock for the mock ODFI: how long a banking day and a file acknowledgment take, in seconds. */
 export const SIM = {
   bankingDaySeconds: Number(process.env.SIM_BANKING_DAY_SECONDS ?? 20),
@@ -43,6 +49,9 @@ if (!isTestMode) {
   }
   if (process.env.ENCRYPTION_KEY === 'change-me-to-a-long-random-string') {
     throw new Error('ENCRYPTION_KEY is still the example value; generate a random one for live mode');
+  }
+  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+    throw new Error('SESSION_SECRET must be set (32+ random characters) when API_KEY is a live key: it signs user sessions');
   }
 } else if (!process.env.ENCRYPTION_KEY) {
   console.warn('[config] ENCRYPTION_KEY is not set; using the development default (test mode only)');
