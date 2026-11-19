@@ -9,6 +9,7 @@ import { transportName } from './services/odfi/index.js';
 import { increaseEnabled, increaseSandbox } from './services/increase.js';
 import { JOBS, startJobs } from './jobs.js';
 import { authenticate, enforceRole, seedAdmin } from './auth.js';
+import { rateLimit } from './middleware/rateLimit.js';
 import { privateAuth, publicAuth } from './routes/auth.js';
 import accounts from './routes/accounts.js';
 import transfers from './routes/transfers.js';
@@ -44,6 +45,10 @@ app.use('/api', async (_req, res, next) => {
 app.use('/api/auth', publicAuth);
 app.use('/api/auth', privateAuth);
 app.use('/api', authenticate, enforceRole);
+
+// Rate limiting: protect payment-sensitive endpoints from floods and accidental loops.
+app.use('/api/transfers', rateLimit({ label: 'payment initiation' }));
+app.use('/api/accounts', rateLimit({ label: 'account management' }));
 
 // Serverless stand-in for the timers below: run any job that is due before handling the request. The UI polls
 // every few seconds, so payments still move pending → submitted → accepted → settled on their own while it is open.

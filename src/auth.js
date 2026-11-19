@@ -7,9 +7,15 @@ import crypto from 'node:crypto';
 import { query } from './db.js';
 import { API_KEY, isTestMode } from './config.js';
 
-export const ROLES = ['admin', 'operator', 'viewer'];
+export const ROLES = ['admin', 'operator', 'viewer', 'approver'];
+/** Roles permitted to approve a payment that is pending dual-control review. */
+export const APPROVER_ROLES = ['admin', 'approver'];
+/** Default dual-approval threshold in cents. Configurable via DUAL_APPROVAL_THRESHOLD_CENTS env var. */
+export const dualApprovalThresholdCents = () => Number(process.env.DUAL_APPROVAL_THRESHOLD_CENTS ?? 1_000_000);
 const SESSION_HOURS = Number(process.env.SESSION_HOURS ?? 8);
-const secret = process.env.SESSION_SECRET || 'dev-only-session-secret';
+// SESSION_SECRET is validated in config.js. In test mode without a configured secret,
+// fall back to a random per-process value so sessions never use a known public string.
+const secret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 // --- Passwords (scrypt, per-user salt) ---
 export function hashPassword(password) {

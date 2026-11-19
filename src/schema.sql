@@ -179,3 +179,83 @@ CREATE TABLE IF NOT EXISTS account_changes (
   new_value       text,
   created_at      timestamptz NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- PHASE 1 – CORE FOUNDATION
+-- ============================================================
+
+-- Companies (Originators). Supports future multi-tenancy; nullable on existing tables for backward compat.
+CREATE TABLE IF NOT EXISTS companies (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  legal_name         text NOT NULL,
+  nacha_company_id   char(10) NOT NULL UNIQUE,  -- 10-char Nacha originator ID (e.g. Tax ID prefixed with '1')
+  odfi_routing       char(9),
+  status             text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'underwriting')),
+  created_at         timestamptz NOT NULL DEFAULT now()
+);
+
+-- Add company_id FK (nullable — backward compatible with existing single-tenant data)
+ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS company_id uuid REFERENCES companies(id);
+ALTER TABLE transfers     ADD COLUMN IF NOT EXISTS company_id uuid REFERENCES companies(id);
+ALTER TABLE ach_files     ADD COLUMN IF NOT EXISTS company_id uuid REFERENCES companies(id);
+CREATE INDEX IF NOT EXISTS bank_accounts_company_idx ON bank_accounts(company_id);
+CREATE INDEX IF NOT EXISTS transfers_company_idx     ON transfers(company_id);
+
+-- Add 'approver' to users role constraint (drop old, add new)
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check
+  CHECK (role IN ('admin', 'operator', 'viewer', 'approver'));
+
+-- Payment approvals: dual-control for transfers above the configurable threshold.
+-- Constraint: the user who requested cannot be the reviewer (enforced at application level too).
+CREATE TABLE IF NOT EXISTS payment_approvals (
+  id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  transfer_id          uuid NOT NULL REFERENCES transfers(id),
+  requested_by_user_id uuid NOT NULL REFERENCES users(id),
+  reviewed_by_user_id  uuid REFERENCES users(id),
+  status               text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  rejection_reason     text,
+  created_at           timestamptz NOT NULL DEFAULT now(),
+  decided_at           timestamptz,
+  CONSTRAINT no_self_approval CHECK (requested_by_user_id IS DISTINCT FROM reviewed_by_user_id)
+);
+CREATE INDEX IF NOT EXISTS approvals_transfer_idx ON payment_approvals(transfer_id);
+CREATE INDEX IF NOT EXISTS approvals_status_idx   ON payment_approvals(status);
+
+-- Idempotency records: prevent duplicate payment submission from network retries.
+-- payload_hash = SHA-256 of the canonicalized request body fields.
+-- response_body is populated after successful processing; NULL means in-flight.
+CREATE TABLE IF NOT EXISTS idempotency_records (
+  idempotency_key  text PRIMARY KEY,
+  request_path     text NOT NULL,
+  payload_hash     char(64) NOT NULL,
+  response_status  int,
+  response_body    jsonb,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  expires_at       timestamptz NOT NULL DEFAULT now() + interval '72 hours'
+);
+CREATE INDEX IF NOT EXISTS idempotency_expires_idx ON idempotency_records(expires_at);
+
+-- Audit logs: structured, append-only event log for all security and financial actions.
+-- Hash chain columns (prev_hash, current_hash) are added in Phase 4.
+-- Application DB role must have INSERT + SELECT only on this table (enforced in production).
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  correlation_id   text,
+  actor_id         uuid,
+  actor_role       text,
+  ip_address       text,
+  action           text NOT NULL,
+  resource_type    text NOT NULL,
+  resource_id      text,
+  company_id       uuid REFERENCES companies(id),
+  previous_state   jsonb,
+  new_state        jsonb,
+  outcome          text NOT NULL DEFAULT 'success' CHECK (outcome IN ('success', 'failure', 'error')),
+  metadata         jsonb,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS audit_logs_action_idx     ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS audit_logs_actor_idx      ON audit_logs(actor_id);
+CREATE INDEX IF NOT EXISTS audit_logs_resource_idx   ON audit_logs(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS audit_logs_created_idx    ON audit_logs(created_at);

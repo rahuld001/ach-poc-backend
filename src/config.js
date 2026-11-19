@@ -54,7 +54,19 @@ if (!isTestMode) {
     throw new Error('SESSION_SECRET must be set (32+ random characters) when API_KEY is a live key: it signs user sessions');
   }
 } else if (!process.env.ENCRYPTION_KEY) {
-  console.warn('[config] ENCRYPTION_KEY is not set; using the development default (test mode only)');
+  console.warn('[config] ENCRYPTION_KEY is not set; using the development default. This is for local test mode ONLY. Never use this in staging or production.');
+} else if (process.env.ENCRYPTION_KEY === 'change-me-to-a-long-random-string' || process.env.ENCRYPTION_KEY === 'dev-only-key') {
+  console.warn('[config] ENCRYPTION_KEY is set to a known placeholder value. Rotate it before sharing test data or promoting to any shared environment.');
+}
+
+// SESSION_SECRET guard: a known default string means sessions from this instance are
+// forgeable on any other instance sharing the same default. Use a random value always.
+if (!process.env.SESSION_SECRET) {
+  if (!isTestMode) {
+    throw new Error('SESSION_SECRET must be set (32+ random characters) when API_KEY is a live key: it signs user sessions');
+  } else {
+    console.warn('[config] SESSION_SECRET is not set. A random per-process secret will be used. Sessions will not survive server restarts (test mode only).');
+  }
 }
 
 // Test mode must never be able to move real money.

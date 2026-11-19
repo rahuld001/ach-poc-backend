@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { query, withTx } from '../db.js';
+import { checkIdempotency, computePayloadHash, saveIdempotencyResponse } from '../middleware/idempotency.js';
 import {
   ADMINISTRATIVE_RETURN_CODES, RETURN_RATE_THRESHOLDS, REVERSAL_WINDOW_BANKING_DAYS, UNAUTHORIZED_RETURN_CODES,
   addBankingDays, authorizationText, secCodeFor, toIsoDate,
@@ -75,17 +76,6 @@ router.post('/', async (req, res) => {
   const { bank_account_id, direction, amount_cents, description, authorization, rail = 'mock' } = req.body ?? {};
   const idempotencyKey = req.get('Idempotency-Key') || null;
 
-  if (idempotencyKey) {
-    const { rows: [existing] } = await query(`${LIST_SQL} WHERE t.idempotency_key = $1`, [idempotencyKey]);
-    if (existing) {
-      // Same key with a different payment is a client bug, not a retry: refuse rather than return the wrong transfer.
-      const same = existing.bank_account_id === bank_account_id && existing.direction === direction &&
-        existing.amount_cents === amount_cents && existing.rail === rail;
-      if (!same) throw new HttpError(422, 'Idempotency-Key was already used for a different payment');
-      return res.json(existing);
-    }
-  }
-
   if (!['debit', 'credit'].includes(direction)) throw new HttpError(400, 'direction must be debit or credit');
   if (!['mock', 'increase'].includes(rail)) throw new HttpError(400, 'rail must be mock or increase');
   if (rail === 'increase' && !increaseEnabled) throw new HttpError(400, 'The Increase rail is not configured (set INCREASE_API_KEY)');
@@ -94,7 +84,27 @@ router.post('/', async (req, res) => {
   if (amount_cents > max) throw new HttpError(400, `Amount exceeds per-transfer limit of $${(max / 100).toFixed(2)}`);
   if (authorization?.accepted !== true) throw new HttpError(400, 'Customer authorization is required');
 
+  // Payload hash covers the fields that uniquely identify the payment intent.
+  const payloadHash = idempotencyKey
+    ? computePayloadHash({ bank_account_id, direction, amount_cents, rail })
+    : null;
+
   const created = await withTx(async (client) => {
+    // Idempotency check: atomic INSERT prevents concurrent duplicates.
+    if (idempotencyKey) {
+      const idem = await checkIdempotency(client, {
+        idempotencyKey,
+        requestPath: '/api/transfers',
+        payloadHash,
+      });
+      if (idem.conflict) throw new HttpError(409, 'Idempotency-Key was already used for a different payment');
+      if (idem.inFlight) throw new HttpError(409, 'A request with this Idempotency-Key is already being processed. Retry in a moment.');
+      if (!idem.isNew) {
+        // Exact replay: return the previously created transfer (fetched below, outside the tx).
+        return { __cached: true, cachedTransferId: idem.body?.id };
+      }
+    }
+
     const { rows: [account] } = await client.query('SELECT * FROM bank_accounts WHERE id = $1 FOR UPDATE', [bank_account_id]);
     if (!account) throw new HttpError(404, 'Bank account not found');
     if (account.status !== 'verified') throw new HttpError(409, `Bank account is ${account.status}`);
@@ -129,8 +139,20 @@ router.post('/', async (req, res) => {
       [bank_account_id, mandate.id, direction, amount_cents, description ?? null, secCodeFor(direction), idempotencyKey, rail, risk],
     );
     await client.query(`INSERT INTO transfer_events (transfer_id, status, note) VALUES ($1, 'pending', 'Transfer created')`, [t.id]);
+
+    // Store the transfer ID in the idempotency record so retries can replay it.
+    if (idempotencyKey) {
+      await saveIdempotencyResponse(client, { idempotencyKey, status: 201, body: { id: t.id } });
+    }
+
     return t;
   });
+
+  // Idempotent replay: fetch the full transfer row for the previously created transfer.
+  if (created.__cached) {
+    const { rows: [cached] } = await query(`${LIST_SQL} WHERE t.id = $1`, [created.cachedTransferId]);
+    return res.status(200).json(cached);
+  }
 
   const { rows: [transfer] } = await query(`${LIST_SQL} WHERE t.id = $1`, [created.id]);
   res.status(201).json(transfer);
